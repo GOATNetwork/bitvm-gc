@@ -38,20 +38,20 @@ impl S {
     }
 
     pub fn hash(&self) -> Self {
-        Self(hash(&self.0))
+        Self(hash(&self.0, None))
     }
 
-    pub fn hash_ext(&self, gid: u32) -> Self {
+    pub fn hash_ext(&self, gid: u32, salt: Option<S>) -> Self {
         let mut input = [0u8; LABEL_SIZE + 4];
         input[..LABEL_SIZE].copy_from_slice(&self.0);
         input[LABEL_SIZE..].copy_from_slice(&gid.to_le_bytes());
-        Self(hash(&input))
+        Self(hash(&input, salt.map(|s| s.0)))
     }
 
     pub fn hash_together(a: Self, b: Self) -> Self {
         let mut h = a.0.to_vec();
         h.extend(b.0.to_vec());
-        Self(hash(&h))
+        Self(hash(&h, None))
     }
 
     pub fn xor(mut a: Self, b: Self) -> Self {

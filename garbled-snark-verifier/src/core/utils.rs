@@ -13,8 +13,21 @@ pub const SUB_CIRCUIT_MAX_GATES: usize = 2_000_000;
 pub const SUB_INPUT_GATES_PART_SIZE: usize = 200_000;
 pub const SUB_INPUT_GATES_PARTS: usize = 10;
 pub const LABEL_SIZE: usize = 16;
-// FIXME: set up a private global difference
-pub static DELTA: S = S::one();
+/// Default global DELTA for non-C&C garbling. C&C uses per-instance delta passed explicitly.
+pub static NON_CAC_DELTA: S = S::one();
+/// Default global salt for non-C&C garbling (`_aes` backend only). C&C uses a fresh
+/// per-instance random salt passed explicitly.
+pub static NON_CAC_SALT: S = S([0xA5u8; LABEL_SIZE]);
+
+#[cfg(feature = "_aes")]
+static AES128_CIPHER: std::sync::OnceLock<aes::Aes128> = std::sync::OnceLock::new();
+
+/// Fixed-key AES-128 cipher, expanded once and reused.
+#[cfg(feature = "_aes")]
+fn aes128_static_cipher() -> &'static aes::Aes128 {
+    use aes::cipher::KeyInit;
+    AES128_CIPHER.get_or_init(|| aes::Aes128::new(&[0x42; 16].into()))
+}
 
 // u32 is not enough for current gates scale.
 pub static GID: AtomicU32 = AtomicU32::new(0);
@@ -24,12 +37,17 @@ pub fn inc_gid() -> u32 {
     GID.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+#[inline(always)]
+pub fn reset_gid() {
+    GID.store(0, Ordering::SeqCst);
+}
+
 pub fn bit_to_usize(bit: bool) -> usize {
     if bit { 1 } else { 0 }
 }
 
 #[allow(unused_variables)]
-pub fn hash(input: &[u8]) -> [u8; LABEL_SIZE] {
+pub fn hash(input: &[u8], salt: Option<[u8; LABEL_SIZE]>) -> [u8; LABEL_SIZE] {
     #[allow(unused_assignments, unused_mut)]
     let mut output = [0u8; 32];
 
@@ -55,26 +73,33 @@ pub fn hash(input: &[u8]) -> [u8; LABEL_SIZE] {
     }
     #[cfg(feature = "_aes")]
     {
-        use aes::Aes128;
-        use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
-        use std::cmp::min;
+        use aes::cipher::{BlockEncrypt, generic_array::GenericArray};
 
-        // hardcoded AES key
-        let key = GenericArray::from_slice(&[0u8; 16]);
-        let cipher = Aes128::new(&key);
-
-        // using Cipher Block Chaining
-        // hardcoded IV
-        let mut block = GenericArray::clone_from_slice(&[0u8; 16]);
-
-        // using Cipher Block Chaining
-        for chunk in input.chunks(16) {
-            for i in 0..min(chunk.len(), 16) {
-                block[i] ^= chunk[i];
-            }
-            cipher.encrypt_block(&mut block);
+        // Guo-Katz-Wang-Yu (ePrint 2019/074, Thm 5): H_S(x,i) = pi(sigma(S^x)) ^ sigma(S^x),
+        // sigma(x_L||x_R) = (x_L^x_R)||x_L. `input` is `label || tweak_bytes`; tweak is
+        // zero-extended to LABEL_SIZE since only `hash_ext`'s 20-byte shape is live today.
+        // This follows the implementation:
+        // https://github.com/BitVM/garbled-snark-verifier/blob/52b49127dc426f0c88ce7fc418116e67173c2f22/src/hashers/mod.rs#L124
+        assert!(input.len() >= LABEL_SIZE, "_aes hash requires at least a 16-byte label");
+        let salt = salt.expect("_aes hash requires an explicit random salt");
+        let mut x0 = [0u8; LABEL_SIZE];
+        for i in 0..LABEL_SIZE {
+            let tweak_byte = input.get(LABEL_SIZE + i).copied().unwrap_or(0);
+            x0[i] = input[i] ^ tweak_byte ^ salt[i];
         }
-        output[..16].copy_from_slice(&block);
+        let mut p = [0u8; LABEL_SIZE];
+        for i in 0..8 {
+            p[i] = x0[i] ^ x0[8 + i];
+        }
+        p[8..16].copy_from_slice(&x0[0..8]);
+
+        let cipher = aes128_static_cipher();
+        let mut block = GenericArray::clone_from_slice(&p);
+        cipher.encrypt_block(&mut block);
+
+        for i in 0..LABEL_SIZE {
+            output[i] = block[i] ^ p[i];
+        }
     }
     unsafe { *(output.as_ptr() as *const [u8; LABEL_SIZE]) }
 }
@@ -143,6 +168,16 @@ pub fn check_guest(
     sub_wires: &[u8],
     sub_ciphertexts: &[u8],
 ) -> Vec<u8>  {
+    check_guest_with_delta(sub_gates_parts, sub_wires, sub_ciphertexts, NON_CAC_DELTA, Some(NON_CAC_SALT))
+}
+
+pub fn check_guest_with_delta(
+    sub_gates_parts: &[Vec<u8>; SUB_INPUT_GATES_PARTS],
+    sub_wires: &[u8],
+    sub_ciphertexts: &[u8],
+    delta: S,
+    salt: Option<S>,
+) -> Vec<u8>  {
     // read sub_ciphertexts:
     let mut c_start = 0;
     let num_ciphertexts = u64::from_le_bytes(sub_ciphertexts[c_start..c_start + 8].try_into().unwrap());
@@ -153,7 +188,7 @@ pub fn check_guest(
     let mut input = vec![0u8; input_size as usize];
     let mut offset = 0;
     let mut index = 0;
-    input[offset..offset + LABEL_SIZE].copy_from_slice(&DELTA.0);
+    input[offset..offset + LABEL_SIZE].copy_from_slice(&delta.0);
     offset += LABEL_SIZE;
     for part in 0..SUB_INPUT_GATES_PARTS {
         let sub_gates: SerializableSubCircuitGates<SUB_INPUT_GATES_PART_SIZE> = deserialize_from_bytes(&sub_gates_parts[part]);
@@ -165,10 +200,10 @@ pub fn check_guest(
                 let start_b0 = base + (gate.wire_b_id as usize) * LABEL_SIZE;
 
                 let a0 = S::from_slice(&sub_wires[start_a0..start_a0 + LABEL_SIZE]);
-                let a1 = a0 ^ DELTA;
+                let a1 = a0 ^ delta;
 
-                let h0 = a0.hash_ext(gate.gid);
-                let h1 = a1.hash_ext(gate.gid);
+                let h0 = a0.hash_ext(gate.gid, salt);
+                let h1 = a1.hash_ext(gate.gid, salt);
 
                 // align memory
                 input[offset..offset + 4].copy_from_slice(&(sub_gates.gates[i].gate_type as u32).to_le_bytes().to_vec());

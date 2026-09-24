@@ -1,0 +1,45 @@
+[package]
+name = "verifiable-circuit-babe"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+ark-bn254 = { version = "0.5.0", features = ["curve", "scalar_field"], default-features = false }
+ark-ff = "0.5.0"
+ark-ec = "0.5.0"
+ark-serialize = { version = "0.5.0", default-features = false, features = ["derive"] }
+ark-groth16 = "0.5.0"
+ark-crypto-primitives = "0.5.0"
+ark-relations = "0.5.0"
+bincode = { workspace = true }
+blake3 = "1.6.1"
+serde = { version = "1.0.197", features = ["derive"] }
+sha2 = { workspace = true }
+rand = "0.8.5"
+rand_chacha = { version = "0.3", default-features = false }
+p3-maybe-rayon = { workspace = true, features = ["parallel"] }
+garbled-snark-verifier = { workspace = true }
+aes = "0.8"
+cfg-if = "1.0.4"
+ripemd = "0.2.0"
+rayon = "1.11.0"
+
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+bitvm = { git = "https://github.com/GOATNetwork/BitVM.git", branch = "GA" }
+bitcoin = { version = "0.32.5", features = ["rand-std"] }
+zkm-sdk = { workspace = true }
+zkm-verifier = { workspace = true }
+tracing = "0.1"
+
+[target.'cfg(target_os = "zkvm")'.dependencies]
+zkm-zkvm = { workspace = true }
+
+
+[features]
+default = ["aes"]
+garbled = ["garbled-snark-verifier/garbled"]
+sha2 = ["garbled-snark-verifier/_sha2", "garbled-snark-verifier/_getrandom"]
+poseidon2 = ["garbled-snark-verifier/_poseidon2", "garbled-snark-verifier/_getrandom"]
+blake3 = ["garbled-snark-verifier/_blake3", "garbled-snark-verifier/_getrandom"]
+aes = ["garbled-snark-verifier/_aes", "garbled-snark-verifier/_getrandom"]

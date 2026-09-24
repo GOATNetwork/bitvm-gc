@@ -152,7 +152,7 @@ impl Fq {
         U254::select(bld, &wires_1, &wires_2, s)
     }
 
-    fn mul_by_constant_montgomery<T: CircuitTrait>(bld: &mut T, a: &[usize], b: ark_bn254::Fq) -> Vec<usize> {
+    pub fn mul_by_constant_montgomery<T: CircuitTrait>(bld: &mut T, a: &[usize], b: ark_bn254::Fq) -> Vec<usize> {
         assert_eq!(a.len(), Self::N_BITS);
 
         if b == ark_bn254::Fq::ZERO {
@@ -161,6 +161,14 @@ impl Fq {
 
         if b == Fq::as_montgomery(ark_bn254::Fq::ONE) {
             return a.to_vec();
+        }
+
+        // b == 1 (standard form) means: convert a from Montgomery → standard.
+        // montgomery_reduce(a ‖ 0) = a * R⁻¹ mod p, skipping the Karatsuba mul entirely.
+        if b == ark_bn254::Fq::ONE {
+            let mut padded = a.to_vec();
+            padded.extend((0..Self::N_BITS).map(|_| bld.zero()));
+            return Self::montgomery_reduce(bld, &padded);
         }
 
         let mul_circuit = U254::mul_by_constant(bld, a, b.into());

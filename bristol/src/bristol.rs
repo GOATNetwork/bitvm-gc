@@ -158,7 +158,7 @@ pub fn write_bristol(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use garbled_snark_verifier::core::utils::DELTA;
+    use garbled_snark_verifier::core::utils::NON_CAC_DELTA;
     use rand::Rng;
 
     pub fn evaluator(
@@ -175,7 +175,7 @@ mod tests {
                 if !bit {
                     wire.borrow_mut().set_label(label);
                 } else {
-                    wire.borrow_mut().set_label(label ^ DELTA);
+                    wire.borrow_mut().set_label(label ^ NON_CAC_DELTA);
                 }
 
                 wire.borrow_mut().set(bit);

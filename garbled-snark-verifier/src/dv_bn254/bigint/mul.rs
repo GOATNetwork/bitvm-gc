@@ -29,6 +29,84 @@ fn extend_with_false<T: CircuitTrait>(bld: &mut T, wires: &mut Vec<usize>) {
 //     flags[index]
 // }
 
+/// Squaring base case: exploits a[i]*a[i]=a[i] (no AND) and symmetry a[i]*a[j]=a[j]*a[i]
+/// (reuse the same wire), halving AND gates vs mul_generic.
+fn square_base<T: CircuitTrait>(bld: &mut T, a: &[usize], n: usize) -> Vec<usize> {
+    // Precompute AND pairs: diagonal is free, symmetric pairs share one gate.
+    let mut products = vec![vec![0usize; n]; n];
+    for i in 0..n {
+        for j in i..n {
+            if i == j {
+                products[i][j] = a[i]; // a[i] AND a[i] = a[i]
+            } else {
+                let p = bld.and_wire(a[i], a[j]);
+                products[i][j] = p;
+                products[j][i] = p; // fan-out, no extra gate
+            }
+        }
+    }
+    let mut res = vec![bld.zero(); n * 2];
+    for j in 0..n {
+        let partial: Vec<usize> = (0..n).map(|i| products[i][j]).collect();
+        let segment = res[j..j + n].to_vec();
+        let new_bits = add_generic(bld, &segment, &partial, n);
+        res[j..j + n + 1].clone_from_slice(&new_bits);
+    }
+    res
+}
+
+/// Karatsuba squaring: all three recursive sub-problems are squarings,
+/// and the base case uses square_base (≈ half the AND gates of mul_generic).
+pub fn square_karatsuba_generic<T: CircuitTrait>(bld: &mut T, a_wires: &[usize], len: usize) -> Vec<usize> {
+    if len < 5 {
+        return square_base(bld, a_wires, len);
+    }
+    let len_0 = len / 2;
+    let len_1 = len.div_ceil(2);
+
+    let a_0 = a_wires[0..len_0].to_vec();
+    let a_1 = a_wires[len_0..].to_vec();
+
+    let sq_0 = square_karatsuba_generic(bld, &a_0, len_0);
+    let sq_1 = square_karatsuba_generic(bld, &a_1, len_1);
+
+    let mut extended_sq_0 = sq_0.clone();
+    let mut extended_a_0 = a_0.clone();
+    if len_0 < len_1 {
+        extend_with_false(bld, &mut extended_a_0);
+        extend_with_false(bld, &mut extended_sq_0);
+        extend_with_false(bld, &mut extended_sq_0);
+    }
+
+    // (a_0 + a_1)^2 provides the Karatsuba cross-term
+    let sum_a = add_generic(bld, &extended_a_0, &a_1, len_1);
+    let mut sq_sum = add_generic(bld, &extended_sq_0, &sq_1, len_1 * 2);
+    extend_with_false(bld, &mut sq_sum);
+
+    let sum_sq = square_karatsuba_generic(bld, &sum_a, len_1 + 1);
+    let cross_term =
+        sub_generic_without_borrow(bld, &sum_sq, &sq_sum, (len_1 + 1) * 2)
+            [..(len + 1)]
+            .to_vec();
+
+    let mut res = vec![bld.zero(); len * 2];
+    res[..(len_0 * 2)].clone_from_slice(&sq_0);
+
+    {
+        let segment = res[len_0..(len_0 + len + 1)].to_vec();
+        let new_segment = add_generic(bld, &segment, &cross_term, len + 1);
+        res[len_0..(len_0 + len + 2)].clone_from_slice(&new_segment);
+    }
+
+    {
+        let segment = res[(2 * len_0)..].to_vec();
+        let new_segment = add_generic(bld, &segment, &sq_1, len_1 * 2);
+        res[(2 * len_0)..].clone_from_slice(&new_segment[..(2 * len_1)]);
+    }
+
+    res
+}
+
 pub fn mul_generic<T: CircuitTrait>(bld: &mut T, a_wires: &[usize], b_wires: &[usize], len: usize) -> Vec<usize> {
     assert_eq!(a_wires.len(), len);
     assert_eq!(b_wires.len(), len);
@@ -136,6 +214,10 @@ impl U254 {
 
     pub fn mul_karatsuba<T: CircuitTrait>(bld: &mut T, a_wires: &[usize], b_wires: &[usize]) -> Vec<usize> {
         mul_karatsuba_generic(bld, a_wires, b_wires, Self::N_BITS)
+    }
+
+    pub fn square_karatsuba<T: CircuitTrait>(bld: &mut T, a_wires: &[usize]) -> Vec<usize> {
+        square_karatsuba_generic(bld, a_wires, Self::N_BITS)
     }
 
     pub fn mul_by_constant<T: CircuitTrait>(bld: &mut T, a_wires: &[usize], c: BigUint) -> Vec<usize> {

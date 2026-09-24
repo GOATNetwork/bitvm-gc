@@ -1,0 +1,28 @@
+[package]
+name = "soldering-host"
+version = "1.1.0"
+edition.workspace = true
+
+[dependencies]
+zkm-sdk = { workspace = true }
+verifiable-circuit-babe = { path = "../../../verifiable-circuit-babe", default-features = false, features = ["garbled"] }
+garbled-snark-verifier = { workspace = true }
+ark-bn254 = { version = "0.5.0", features = ["curve", "scalar_field"], default-features = false }
+ark-groth16 = "0.5.0"
+ark-ff = "0.5.0"
+ark-relations = "0.5.0"
+ark-crypto-primitives = "0.5.0"
+rand = "0.8.5"
+tracing = "0.1"
+rand_chacha = { version = "0.3", default-features = false }
+bitvm = { git = "https://github.com/GOATNetwork/BitVM.git", branch = "GA" }
+
+[build-dependencies]
+zkm-build = { workspace = true }
+
+[features]
+default = ["aes"]
+sha2 = ["verifiable-circuit-babe/sha2"]
+poseidon2 = ["verifiable-circuit-babe/poseidon2"]
+blake3 = ["verifiable-circuit-babe/blake3"]
+aes = ["verifiable-circuit-babe/aes"]

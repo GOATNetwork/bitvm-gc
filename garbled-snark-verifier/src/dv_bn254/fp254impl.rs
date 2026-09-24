@@ -177,7 +177,8 @@ pub trait Fp254Impl: Sized {
 
     fn square_montgomery<T: CircuitTrait>(bld: &mut T, a: &[usize]) -> Vec<usize> {
         assert_eq!(a.len(), Self::N_BITS);
-        Self::mul_montgomery(bld, a, a)
+        let sq_circuit = U254::square_karatsuba(bld, a);
+        Self::montgomery_reduce(bld, &sq_circuit)
     }
 
     // ──────────────────────────  2-way mux  (sel ? a : b)  ────────────────────

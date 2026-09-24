@@ -19,6 +19,25 @@ pub struct G1Projective {
     pub z: Fq,
 }
 pub const G1_PROJECTIVE_LEN: usize = 3 * FQ_LEN;
+/// Width of each scalar-mul window, in bits. w=8 gives 32 windows for a 254-bit scalar
+/// (vs 64 for w=4), so the dominant Fq-mul cost drops roughly 2× at the price of a
+/// 16× larger precomputed affine table (free in gates; only bandwidth).
+pub const SCALAR_WINDOW_BITS: usize = 8;
+pub const SCALAR_WINDOW_COUNT: usize = (Fr::N_BITS + SCALAR_WINDOW_BITS - 1) / SCALAR_WINDOW_BITS;
+pub const SCALAR_WINDOW_ENTRIES: usize = 1 << SCALAR_WINDOW_BITS;
+
+// ─── Signed-digit scalar-mul parameters ────────────────────────────────────────
+// Scalar is recoded offline (Booth) into digits d_i ∈ [-128, 127], one extra window
+// absorbs the carry. Each window carries (w-1)=7 index bits + 1 sign bit + 1 skip bit = 9 bits.
+// Table is halved: 2^(w-1) = 128 entries per window, storing (j+1)·256^i·P for j ∈ [0, 127].
+// Saves ~50 % of the MUX cost vs. the unsigned version at the price of a conditional
+// y-negation (near-free) and a single extra window.
+pub const SIGNED_SCALAR_WINDOW_BITS: usize = 8;
+pub const SIGNED_SCALAR_WINDOW_COUNT: usize =
+    (Fr::N_BITS + SIGNED_SCALAR_WINDOW_BITS - 1) / SIGNED_SCALAR_WINDOW_BITS + 1;
+pub const SIGNED_SCALAR_WINDOW_ENTRIES: usize = 1 << (SIGNED_SCALAR_WINDOW_BITS - 1);
+pub const SIGNED_DIGIT_BITS: usize = SIGNED_SCALAR_WINDOW_BITS + 1;
+pub const SIGNED_SCALAR_DIGIT_TOTAL_BITS: usize = SIGNED_SCALAR_WINDOW_COUNT * SIGNED_DIGIT_BITS;
 impl G1Projective {
     pub fn as_montgomery(p: ark_bn254::G1Projective) -> ark_bn254::G1Projective {
         ark_bn254::G1Projective {
@@ -354,6 +373,138 @@ impl G1Projective {
             }
         }
         res
+    }
+
+    /// Mixed projective + affine addition in Montgomery form.
+    ///
+    /// `proj`   — variable projective point (X·R : Y·R : Z·R), with Z != 0.
+    /// `affine` — variable affine point encoded as Montgomery wires (x·R, y·R).
+    ///
+    /// Returns (X3·R : Y3·R : Z3·R).
+    pub fn add_mixed_montgomery_no_inf<T: CircuitTrait>(
+        bld: &mut T,
+        proj: &[usize],
+        affine: &[usize],
+    ) -> Vec<usize> {
+        assert_eq!(proj.len(), G1_PROJECTIVE_LEN);
+        assert_eq!(affine.len(), G1_AFFINE_LEN);
+
+        let x1 = &proj[0..FQ_LEN];
+        let y1 = &proj[FQ_LEN..2 * FQ_LEN];
+        let z1 = &proj[2 * FQ_LEN..3 * FQ_LEN];
+        let x2 = &affine[0..FQ_LEN];
+        let y2 = &affine[FQ_LEN..2 * FQ_LEN];
+
+        // z2 = 1 (affine), so z2² = z2³ = 1 and u1 = x1, s1 = y1.
+        let z1s = Fq::square_montgomery(bld, z1);
+        let z1c = Fq::mul_montgomery(bld, &z1s, z1);
+
+        let u2 = Fq::mul_montgomery(bld, x2, &z1s);
+        let s2 = Fq::mul_montgomery(bld, y2, &z1c);
+
+        let h = Fq::sub(bld, x1, &u2);
+        let r = Fq::sub(bld, y1, &s2);
+
+        let h2 = Fq::square_montgomery(bld, &h);
+        let g = Fq::mul_montgomery(bld, &h, &h2);
+        let v = Fq::mul_montgomery(bld, x1, &h2);
+
+        let r2 = Fq::square_montgomery(bld, &r);
+        let r2g = Fq::add(bld, &r2, &g);
+        let vd = Fq::double(bld, &v);
+        let x3 = Fq::sub(bld, &r2g, &vd);
+
+        let vx3 = Fq::sub(bld, &v, &x3);
+        let w = Fq::mul_montgomery(bld, &r, &vx3);
+        let s1g = Fq::mul_montgomery(bld, y1, &g);
+        let y3 = Fq::sub(bld, &w, &s1g);
+
+        // z2 = 1, so z1·z2 = z1.
+        let z3 = Fq::mul_montgomery(bld, z1, &h);
+
+        let mut res = Vec::new();
+        res.extend(x3);
+        res.extend(y3);
+        res.extend(z3);
+        res
+    }
+
+    /// Unsigned 8-bit windowed scalar multiplication with a garbler-private full affine table.
+    ///
+    /// `scalar` — 254 wire indices, raw (non-Montgomery) bits, LSB-first.
+    /// `table`  — `SCALAR_WINDOW_COUNT` windows of `SCALAR_WINDOW_ENTRIES` affine points,
+    ///            each encoded as Montgomery wires (x·R, y·R).
+    ///            Window `w`, entry `j` represents `j * (256^w * P)` in affine form.
+    ///            Entry j=0 is the point at infinity (addition skipped via window_nonzero guard).
+    pub fn scalar_mul_private_table_circuit<T: CircuitTrait>(
+        bld: &mut T,
+        scalar: &[usize],
+        table: &[usize],
+    ) -> Vec<usize> {
+        assert_eq!(scalar.len(), Fr::N_BITS);
+        assert_eq!(
+            table.len(),
+            SCALAR_WINDOW_COUNT * SCALAR_WINDOW_ENTRIES * G1_AFFINE_LEN
+        );
+
+        let z_one = Fq::wires_set(bld, Fq::as_montgomery(ark_bn254::Fq::from(1u64))).0.to_vec();
+        let inf_wires = G1Projective::wires_set(
+            bld,
+            G1Projective::as_montgomery(ark_bn254::G1Projective::default()),
+        )
+        .to_vec_wires();
+
+        let mut acc: Vec<usize> = inf_wires.clone();
+        let mut acc_is_inf: usize = bld.one();
+        let zero_wire = bld.zero();
+
+        let bit = |i: usize| -> usize {
+            if i < Fr::N_BITS { scalar[i] } else { zero_wire }
+        };
+
+        for w in 0..SCALAR_WINDOW_COUNT {
+            let base = w * SCALAR_WINDOW_BITS;
+            let sel: Vec<usize> = (0..SCALAR_WINDOW_BITS).map(|k| bit(base + k)).collect();
+
+            // window_nonzero = OR of all 8 selector bits
+            let mut window_nonzero = sel[0];
+            for &b in &sel[1..] {
+                window_nonzero = bld.or_wire(window_nonzero, b);
+            }
+
+            let window_base = w * SCALAR_WINDOW_ENTRIES * G1_AFFINE_LEN;
+            let ws = &table[window_base..window_base + SCALAR_WINDOW_ENTRIES * G1_AFFINE_LEN];
+
+            let tab_x: Vec<Vec<usize>> = (0..SCALAR_WINDOW_ENTRIES)
+                .map(|i| ws[i * G1_AFFINE_LEN..i * G1_AFFINE_LEN + FQ_LEN].to_vec())
+                .collect();
+            let tab_y: Vec<Vec<usize>> = (0..SCALAR_WINDOW_ENTRIES)
+                .map(|i| ws[i * G1_AFFINE_LEN + FQ_LEN..(i + 1) * G1_AFFINE_LEN].to_vec())
+                .collect();
+
+            let affine_x = Fq::multiplexer(bld, &tab_x, &sel, SCALAR_WINDOW_BITS);
+            let affine_y = Fq::multiplexer(bld, &tab_y, &sel, SCALAR_WINDOW_BITS);
+
+            let mut affine = Vec::with_capacity(G1_AFFINE_LEN);
+            affine.extend_from_slice(&affine_x);
+            affine.extend_from_slice(&affine_y);
+
+            let mut affine_proj = Vec::with_capacity(G1_PROJECTIVE_LEN);
+            affine_proj.extend_from_slice(&affine_x);
+            affine_proj.extend_from_slice(&affine_y);
+            affine_proj.extend_from_slice(&z_one);
+
+            let mixed = Self::add_mixed_montgomery_no_inf(bld, &acc, &affine);
+
+            let candidate =
+                Self::selector_projective_montgomery(bld, &affine_proj, &mixed, acc_is_inf);
+            acc = Self::selector_projective_montgomery(bld, &candidate, &acc, window_nonzero);
+
+            let not_nonzero = not(bld, window_nonzero);
+            acc_is_inf = bld.and_wire(acc_is_inf, not_nonzero);
+        }
+
+        acc
     }
 
     pub fn msm_montgomery_circuit<T: CircuitTrait>(

@@ -231,9 +231,6 @@ impl CircuitAdapter {
 
         let mut wires = Vec::with_capacity(n_wires);
         for i in 0..n_wires {
-            if i.is_multiple_of(10_000_000) {
-                println!("wires: {} M", i / 1_000_000);
-            }
             wires.push(new_wirex_with_id(i as u32));
         }
         println!("init wires took:{:?}", start.elapsed());
@@ -322,9 +319,6 @@ impl CircuitAdapter {
         let n_wires = CircuitAdapter::MAX_BENCHMARK_WIRES;
         let mut wires = Vec::with_capacity(n_wires);
         for i in 0..n_wires {
-            if i.is_multiple_of(10_000_000) {
-                println!("wires: {} M", i / 1_000_000);
-            }
             wires.push(new_wirex_with_id(i as u32));
         }
         println!("init wires took:{:?}", start.elapsed());
