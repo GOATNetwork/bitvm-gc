@@ -114,4 +114,43 @@ mod test {
         let stats = bld.gate_counts();
         println!("Gate counts: {:?}", stats);
     }
+
+    /// The same verifier, garbled and evaluated gate by gate as it is built
+    /// (`sect233k1::stream`), holding only the live wires: the stored build
+    /// above needs more memory than a small machine has. It accepts the valid
+    /// witness and rejects it with one bit flipped.
+    #[test]
+    fn test_dv_snark_verifier_circuit_dvbn254_streamed() {
+        use crate::circuits::sect233k1::stream::{Plan, Streaming, ValuedBuilder};
+        use crate::dv_bn254::dv_ckt::compile_verifier_with;
+
+        fn run(bits: &[bool]) -> bool {
+            let mut plan = Plan::new();
+            let planned = compile_verifier_with(&mut plan, |_, _| {});
+            plan.keep(planned.output_index);
+            let wires = plan.wires();
+            let mut s = Streaming::planned(plan, false);
+            let info = compile_verifier_with(&mut s, |s, (lo, hi)| {
+                assert_eq!(hi + 1 - lo, bits.len());
+                for (wire, &bit) in (lo..=hi).zip(bits.iter()) {
+                    s.set_input(wire, bit);
+                }
+            });
+            assert_eq!(s.wires(), wires);
+            println!(
+                "{} non-free gates, {} wires, {} live at peak; {:?}",
+                s.non_free_gates(),
+                s.wires(),
+                s.peak_live(),
+                s.gate_counts()
+            );
+            s.value(info.output_index)
+        }
+
+        let bits = initialize_witness().to_bits();
+        assert!(run(&bits), "the verifier accepts the valid proof");
+        let mut bad = bits;
+        bad[bits.len() / 2] ^= true;
+        assert!(!run(&bad), "the verifier rejects a changed witness");
+    }
 }

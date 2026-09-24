@@ -6,6 +6,7 @@
 pub mod blake3_ckt;
 
 pub mod builder;
+pub mod stream;
 
 pub mod curve_ckt;
 #[cfg(test)]

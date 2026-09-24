@@ -241,4 +241,72 @@ pub(crate) mod hinted_double_scalar_mul {
 
         assert_eq!(out_point, mont_res);
     }
+
+    /// The same multi-scalar multiplication, garbled and evaluated gate by
+    /// gate as it is built (`sect233k1::stream`), holding only the live wires:
+    /// the stored build above needs more memory than a small machine has.
+    #[test]
+    fn test_hinted_double_scalar_mul_streamed() {
+        use crate::circuits::sect233k1::stream::{Plan, Streaming, ValuedBuilder};
+
+        let scalars = [
+            ark_bn254::Fr::from_str("117254209170240570118468483301402360720011190156626").unwrap(),
+            ark_bn254::Fr::from_str("428956628384832546334058967498472364665310775024525").unwrap(),
+            ark_bn254::Fr::from_str("382966261084432891439040614202494776072682302885809").unwrap(),
+        ];
+        let points = [
+            ark_bn254::G1Projective::generator(),
+            ark_bn254::G1Projective::new_unchecked(
+                ark_bn254::Fq::from_str("19121359422423394397339808609605166974352270143618965761898427716156520530534").unwrap(),
+                ark_bn254::Fq::from_str("7342439030613981009500063463741603071320313438049548764331415952562426998984").unwrap(),
+                ark_bn254::Fq::from_str("12271842149693452803354268597979540201662719082150614901399685997805877048202").unwrap(),
+            ),
+            ark_bn254::G1Projective::new_unchecked(
+                ark_bn254::Fq::from_str("10537734462087416081703093831598556064708483284255095313741526306229817075794").unwrap(),
+                ark_bn254::Fq::from_str("20966915327948412143521801558416747519195976034813410166958802937060892709682").unwrap(),
+                ark_bn254::Fq::from_str("4747267416898579569750028682922202068361043094228046616996619066330493832914").unwrap(),
+            ),
+        ];
+        let res = points[0] * scalars[0] + points[1] * scalars[1] + points[2] * scalars[2];
+        let mont_res = G1Projective::as_montgomery(res);
+        let witness = scalars
+            .iter()
+            .flat_map(|&s| Fr::to_bits(s))
+            .chain(points.iter().flat_map(|&p| G1Projective::to_bits(G1Projective::as_montgomery(p))))
+            .collect::<Vec<bool>>();
+
+        /// Inputs in the stored test's order, then the multiplication; `inputs`
+        /// sees the input wires before any gate reads them.
+        fn build<T: CircuitTrait>(bld: &mut T, inputs: impl FnOnce(&mut T, usize, usize)) -> Vec<usize> {
+            let lo = bld.next_wire();
+            let scalar_wires: Vec<Vec<usize>> = (0..3).map(|_| Fr::wires(bld).0.to_vec()).collect();
+            let point_wires: Vec<Vec<usize>> = (0..3).map(|_| G1Projective::wires(bld).to_vec_wires()).collect();
+            let hi = bld.next_wire();
+            inputs(bld, lo, hi);
+            emit_hinted_double_scalar_mul(bld, &scalar_wires, &point_wires)
+        }
+
+        let mut plan = Plan::new();
+        for w in build(&mut plan, |_, _, _| {}) {
+            plan.keep(w);
+        }
+        let wires = plan.wires();
+        let mut s = Streaming::planned(plan, false);
+        let out = build(&mut s, |s, lo, hi| {
+            assert_eq!(hi - lo, witness.len());
+            for (wire, &bit) in (lo..hi).zip(witness.iter()) {
+                s.set_input(wire, bit);
+            }
+        });
+        assert_eq!(s.wires(), wires);
+        println!(
+            "{} non-free gates, {} wires, {} live at peak; {:?}",
+            s.non_free_gates(),
+            s.wires(),
+            s.peak_live(),
+            s.gate_counts()
+        );
+        let out_point = G1Projective::from_bits_unchecked(out.iter().map(|&w| s.value(w)).collect());
+        assert_eq!(out_point, mont_res);
+    }
 }

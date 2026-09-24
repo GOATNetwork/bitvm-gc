@@ -165,7 +165,7 @@ mod tests {
     use crate::circuits::basic::selector;
     use crate::circuits::bn254::fq6::Fq6;
     use crate::circuits::bn254::g1::{G1Projective, projective_to_affine_montgomery};
-    use crate::core::utils::{NON_CAC_DELTA, NON_CAC_SALT};
+    use crate::core::utils::NON_CAC_SALT;
     use ark_ec::CurveGroup;
     use ark_ff::{AdditiveGroup, Field};
 
@@ -190,12 +190,15 @@ mod tests {
 
         // hand-computing output label
         let g1_output_label = circuit.1[0].wire_a.borrow().select(false).hash_ext(circuit.1[0].gid, Some(NON_CAC_SALT));
+        // Gate 2 is a Cimp at (c, b) = (0, 1): the evaluator's label is the
+        // label of its output value, false, with no correction by delta.
         let g2_output_label = circuit.1[1].wire_a.borrow().select(false).hash_ext(circuit.1[1].gid, Some(NON_CAC_SALT))
             ^ garblings[1].unwrap()
             ^ circuit.1[1].wire_b.borrow().select(true);
+        assert_eq!(g2_output_label, circuit.1[1].wire_c.borrow().select(false));
         let computed_output_label = (g1_output_label).hash_ext(circuit.1[2].gid, Some(NON_CAC_SALT))
             ^ garblings[2].unwrap()
-            ^ (g2_output_label ^ NON_CAC_DELTA);
+            ^ g2_output_label;
 
         assert_eq!(output_label, computed_output_label);
     }

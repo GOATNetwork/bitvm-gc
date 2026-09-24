@@ -21,7 +21,7 @@ const TRAPDOOR_BIT_LEN: usize = FR_LEN * 3;
 
 pub(crate) const WITNESS_BIT_LEN: usize = PROOF_BIT_LEN + PUBINP_BIT_LEN + TRAPDOOR_BIT_LEN;
 
-pub fn get_input_indexes(bld: &mut CircuitAdapter) -> (Proof, PublicInputs, Trapdoor) {
+pub fn get_input_indexes<T: CircuitTrait>(bld: &mut T) -> (Proof, PublicInputs, Trapdoor) {
     let secrets = Trapdoor {
         tau: Fr(bld.fresh()),
         delta: Fr(bld.fresh()),
@@ -210,20 +210,29 @@ fn get_fs_challenge<T: CircuitTrait>(
 /// Function to compile dvsnark verifier circuit
 pub fn compile_verifier() -> (CircuitAdapter, IndexInfo) {
     let mut bld = CircuitAdapter::default();
+    let index_info = compile_verifier_with(&mut bld, |_, _| {});
+    (bld, index_info)
+}
 
+/// The verifier circuit on any builder. `inputs` is called with the input
+/// wires' inclusive range as soon as they are allocated, before any gate reads
+/// them: a builder that evaluates as it goes (`sect233k1::stream`) sets their
+/// values there.
+pub fn compile_verifier_with<T: CircuitTrait>(bld: &mut T, inputs: impl FnOnce(&mut T, (usize, usize))) -> IndexInfo {
     let input_wire_start = bld.next_wire();
-    let (proof, rpin, secrets) = get_input_indexes(&mut bld);
+    let (proof, rpin, secrets) = get_input_indexes(bld);
     let input_wire_end = bld.next_wire();
+    let input_wire_range = (input_wire_start, input_wire_end - 1); // -1 because inclusive range
+    inputs(bld, input_wire_range);
 
     // Prepare
-    let passed_index = verify(&mut bld, proof, rpin, secrets);
-    let index_info = IndexInfo {
-        input_wire_range: (input_wire_start, input_wire_end - 1), // -1 because inclusive range
+    let passed_index = verify(bld, proof, rpin, secrets);
+    IndexInfo {
+        input_wire_range,
         const_zero: bld.zero(),
         const_one: bld.one(),
         output_index: passed_index,
-    };
-    (bld, index_info)
+    }
 }
 
 /// evaluate verifier

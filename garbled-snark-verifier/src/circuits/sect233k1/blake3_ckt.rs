@@ -1,7 +1,11 @@
 //! Binary Circuit Representation of Blake3 Hasher
-//! Implementation directly referenced from official BLAKE3 reference implementation rust code
-//! We only support inputs that fit in a single chunk (1024 bytes) because this is sufficient for our use case (64 bytes input).
-//! Therefore implementation related to "chunks" has been omitted from reference implementation above.
+//! Implementation directly referenced from official BLAKE3 reference implementation rust code,
+//! including its tree mode, so inputs of any length are supported.
+//!
+//! Wire layout: a byte is eight wires, bit 0 first (`U8`); a word is 32 wires, bit 0 first (`U32`).
+//!
+//! Cost: 10,281 AND gates per compression (one per adder bit below the top, see
+//! `wrapping_add_u32`); a 64-byte input is one compression, a 256-byte input four.
 
 use core::cmp::min;
 
@@ -13,10 +17,11 @@ const CHUNK_LEN: usize = 1024;
 
 const CHUNK_START: u32 = 1 << 0;
 const CHUNK_END: u32 = 1 << 1;
+const PARENT: u32 = 1 << 2;
 const ROOT: u32 = 1 << 3;
 
-type U32 = [usize; 32];
-type U8 = [usize; 8];
+pub type U32 = [usize; 32];
+pub type U8 = [usize; 8];
 
 fn const_u32_to_bits_le<T: CircuitTrait>(bld: &mut T, n: u32) -> U32 {
     let vs: Vec<bool> = (0..32).map(|i| (n >> i) & 1 != 0).collect();
@@ -44,18 +49,24 @@ fn get_iv<T: CircuitTrait>(bld: &mut T) -> [U32; 8] {
 
 const MSG_PERMUTATION: [u8; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
 
+/// `a + b mod 2^32` at one AND gate per bit.
+///
+/// The original computed the carry as `(a·b) ⊕ (p·c)`, two ANDs per bit. Under
+/// free-XOR the majority function is one: `maj(a, b, c) = c ⊕ ((a⊕c)·(b⊕c))`.
+/// The carry out of bit 31 is discarded, so it is not computed.
 fn wrapping_add_u32<T: CircuitTrait>(bld: &mut T, a: U32, b: U32) -> U32 {
     let mut result = [0; 32];
     let mut carry = bld.zero();
 
     for i in 0..32 {
-        let ai = a[i];
-        let bi = b[i];
-        let p = bld.xor_wire(ai, bi);
-        let g = bld.and_wire(ai, bi);
+        let p = bld.xor_wire(a[i], b[i]);
         result[i] = bld.xor_wire(p, carry);
-        let t0 = bld.and_wire(p, carry);
-        carry = bld.xor_wire(g, t0);
+        if i < 31 {
+            let ac = bld.xor_wire(a[i], carry);
+            let bc = bld.xor_wire(b[i], carry);
+            let t = bld.and_wire(ac, bc);
+            carry = bld.xor_wire(carry, t);
+        }
     }
 
     result
@@ -206,11 +217,20 @@ fn words_from_little_endian_bytes(bytes: &[U8], words: &mut [U32]) {
 struct Output {
     input_chaining_value: [U32; 8],
     block_words: [U32; 16],
+    /// The chunk's counter; 0 for a parent node. The root's output blocks
+    /// are numbered instead.
+    counter: u64,
     block_len: U32,
     flags: U32,
 }
 
 impl Output {
+    /// The chaining value: the first eight words of the compression, for a
+    /// chunk or parent node that is not the root.
+    fn chaining_value<T: CircuitTrait>(&self, bld: &mut T) -> [U32; 8] {
+        first_8_words(compress(bld, &self.input_chaining_value, &self.block_words, self.counter, self.block_len, self.flags))
+    }
+
     fn root_output_bytes<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
         let root = const_u32_to_bits_le(bld, ROOT);
         for (output_block_counter, out_block) in out_slice.chunks_mut(2 * OUT_LEN).enumerate() {
@@ -315,24 +335,73 @@ impl ChunkState {
         Output {
             input_chaining_value: self.chaining_value,
             block_words,
+            counter: self.chunk_counter,
             block_len: const_u32_to_bits_le(bld, self.block_len as u32),
             flags,
         }
     }
 }
 
-/// An incremental hasher that can accept any number of writes.
-pub(crate) struct Hasher {
+/// A parent node: the two children's chaining values as one block.
+fn parent_output<T: CircuitTrait>(
+    bld: &mut T,
+    left_child_cv: [U32; 8],
+    right_child_cv: [U32; 8],
+    key_words: [U32; 8],
+    flags: U32,
+) -> Output {
+    let zero_gate = bld.zero();
+    let mut block_words = [[zero_gate; 32]; 16];
+    block_words[..8].copy_from_slice(&left_child_cv);
+    block_words[8..].copy_from_slice(&right_child_cv);
+    let parent = const_u32_to_bits_le(bld, PARENT);
+    Output {
+        input_chaining_value: key_words,
+        block_words,
+        counter: 0,
+        block_len: const_u32_to_bits_le(bld, BLOCK_LEN as u32),
+        flags: or_u32(bld, flags, parent),
+    }
+}
+
+fn parent_cv<T: CircuitTrait>(
+    bld: &mut T,
+    left_child_cv: [U32; 8],
+    right_child_cv: [U32; 8],
+    key_words: [U32; 8],
+    flags: U32,
+) -> [U32; 8] {
+    parent_output(bld, left_child_cv, right_child_cv, key_words, flags).chaining_value(bld)
+}
+
+/// An incremental hasher that can accept any number of writes, in the tree
+/// mode of the reference implementation: a stack of subtree chaining values,
+/// merged as chunks complete and at the end.
+pub struct Hasher {
     chunk_state: ChunkState,
+    key_words: [U32; 8],
+    cv_stack: Vec<[U32; 8]>,
+    flags: U32,
 }
 
 impl Hasher {
     fn new_internal<T: CircuitTrait>(bld: &mut T, key_words: [U32; 8], flags: U32) -> Self {
-        Self { chunk_state: ChunkState::new(bld, key_words, 0, flags) }
+        Self { chunk_state: ChunkState::new(bld, key_words, 0, flags), key_words, cv_stack: Vec::new(), flags }
+    }
+
+    /// A completed chunk's chaining value joins the stack, merging with every
+    /// completed subtree of its size (the trailing zeros of the chunk count).
+    fn add_chunk_chaining_value<T: CircuitTrait>(&mut self, bld: &mut T, mut new_cv: [U32; 8], mut total_chunks: u64) {
+        while total_chunks & 1 == 0 {
+            let left = self.cv_stack.pop().expect("a subtree to merge with");
+            new_cv = parent_cv(bld, left, new_cv, self.key_words, self.flags);
+            total_chunks >>= 1;
+        }
+        self.cv_stack.push(new_cv);
     }
 
     /// Construct a new `Hasher` for the regular hash function.
-    pub(crate) fn new<T: CircuitTrait>(bld: &mut T) -> Self {
+    pub fn new<T: CircuitTrait>(bld: &mut T) -> Self {
         let zero_gate = bld.zero();
         let iv = get_iv(bld);
         let zero = [zero_gate; 32];
@@ -340,8 +409,17 @@ impl Hasher {
     }
 
     /// Add input to the hash state. This can be called any number of times.
-    pub(crate) fn update<T: CircuitTrait>(&mut self, bld: &mut T, mut input: &[U8]) {
+    pub fn update<T: CircuitTrait>(&mut self, bld: &mut T, mut input: &[U8]) {
         while !input.is_empty() {
+            // A full chunk with more input coming is complete: its chaining
+            // value goes to the tree, and a new chunk starts.
+            if self.chunk_state.len() == CHUNK_LEN {
+                let chunk_cv = self.chunk_state.output(bld).chaining_value(bld);
+                let total_chunks = self.chunk_state.chunk_counter + 1;
+                self.add_chunk_chaining_value(bld, chunk_cv, total_chunks);
+                self.chunk_state = ChunkState::new(bld, self.key_words, total_chunks, self.flags);
+            }
+
             // Compress input bytes into the current chunk state.
             let want = CHUNK_LEN - self.chunk_state.len();
             let take = min(want, input.len());
@@ -351,13 +429,21 @@ impl Hasher {
     }
 
     /// Finalize the hash and write any number of output bytes.
-    pub(crate) fn finalize<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
-        let output = self.chunk_state.output(bld);
+    pub fn finalize<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
+        // The last chunk, then every subtree on the stack, right to left,
+        // becomes the right child of a parent; the topmost parent is the root.
+        let mut output = self.chunk_state.output(bld);
+        let mut parent_nodes_remaining = self.cv_stack.len();
+        while parent_nodes_remaining > 0 {
+            parent_nodes_remaining -= 1;
+            let right = output.chaining_value(bld);
+            output = parent_output(bld, self.cv_stack[parent_nodes_remaining], right, self.key_words, self.flags);
+        }
         output.root_output_bytes(bld, out_slice);
     }
 }
 
-pub(crate) fn hash<T: CircuitTrait>(bld: &mut T, input_bits: Vec<U8>) -> [U8; 32] {
+pub fn hash<T: CircuitTrait>(bld: &mut T, input_bits: Vec<U8>) -> [U8; 32] {
     let mut hasher = Hasher::new(bld);
     hasher.update(bld, &input_bits);
 
@@ -366,14 +452,25 @@ pub(crate) fn hash<T: CircuitTrait>(bld: &mut T, input_bits: Vec<U8>) -> [U8; 32
     hash
 }
 
+/// `blake3(input)` for an input of `n` bytes: `n` fresh byte inputs in, 32 bytes out.
+pub fn hash_bytes<T: CircuitTrait>(bld: &mut T, input: &[U8]) -> [U8; 32] {
+    let mut hasher = Hasher::new(bld);
+    hasher.update(bld, input);
+    let mut out = [[0usize; 8]; 32];
+    hasher.finalize(bld, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod test {
     use super::super::{
-        blake3_ckt::{Hasher, U8},
+        blake3_ckt::{Hasher, U8, hash_bytes},
         builder::{CircuitAdapter, CircuitTrait},
     };
 
     use blake3::Hasher as RefHasher;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
 
     fn str_to_bits_le(ns: &[u8]) -> Vec<[bool; 8]> {
         let mut vs: Vec<[bool; 8]> = Vec::new();
@@ -385,37 +482,22 @@ mod test {
         vs
     }
 
+    fn read_bytes(wires: &[bool], out: &[U8]) -> Vec<u8> {
+        out.iter().map(|w| (0..8).fold(0u8, |acc, i| acc | (u8::from(wires[w[i]]) << i))).collect()
+    }
+
     #[test]
     fn test_emit_blake3_hash() {
         // Circuit verified for different inputs of known length
 
         let mut bld = CircuitAdapter::default();
 
-        // Calculate Reference Hash using extern blake3 crate
-        let mut hasher = RefHasher::new();
         let input1 = b"fbcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"; // 64 byte input
-        let bool_abc = str_to_bits_le(input1);
-        hasher.update(input1);
-        let ref_out = hasher.finalize();
-        let ref_out_slice1 = ref_out.as_bytes();
-
-        let mut hasher = RefHasher::new();
         let input2 = b"ef02ef02ef03ef02ef02ef02ef04ef02ef02ef02ef02ef0aef02ef02ef02ef02";
-        let bool_ef = str_to_bits_le(input2);
-        hasher.update(input2);
-        let ref_out = hasher.finalize();
-        let ref_out_slice2 = ref_out.as_bytes();
         assert_eq!(input1.len(), input2.len(), "both reference inputs should be of same size");
 
         // Compile blake3 circuit for fixed input length
-        let msg_count_bytes = input2.len();
-        let input_labels: Vec<U8> = (0..msg_count_bytes)
-            .map(|_| {
-                let char0: U8 = bld.fresh();
-                char0
-            })
-            .collect();
-
+        let input_labels: Vec<U8> = (0..input1.len()).map(|_| bld.fresh()).collect();
         let mut hasher = Hasher::new(&mut bld);
         hasher.update(&mut bld, &input_labels);
         let mut out_slice = [[0; 8]; 32];
@@ -423,33 +505,31 @@ mod test {
 
         let stats = bld.gate_counts();
         println!("{stats}");
+        // One compression, one AND per adder bit below the top.
+        assert_eq!(stats.direct_and, 10_281);
 
-        // Evaluate the circuit and input 1 and compare corresponding result
-        let wires = bld.eval_gates(&bool_abc.concat());
-
-        let mut hws = vec![];
-        for out_bits in out_slice {
-            let hw: u8 = out_bits
-                .iter()
-                .enumerate()
-                .fold(0, |acc, (i, &w_id)| acc | ((wires[w_id] as u8) << i));
-            hws.push(hw);
+        // Evaluate the same circuit on both inputs against the blake3 crate.
+        for input in [input1, input2] {
+            let mut hasher = RefHasher::new();
+            hasher.update(input);
+            let wires = bld.eval_gates(&str_to_bits_le(input).concat());
+            assert_eq!(read_bytes(&wires, &out_slice), hasher.finalize().as_bytes().to_vec());
         }
+    }
 
-        assert_eq!(hws, ref_out_slice1.to_vec());
-
-        // Evaluate the same circuit and input 2 and compare corresponding result
-        let wires = bld.eval_gates(&bool_ef.concat());
-
-        let mut hws = vec![];
-        for out_bits in out_slice {
-            let hw: u8 = out_bits
-                .iter()
-                .enumerate()
-                .fold(0, |acc, (i, &w_id)| acc | ((wires[w_id] as u8) << i));
-            hws.push(hw);
+    /// Against the blake3 crate at one-chunk lengths and in tree mode: two
+    /// chunks, four (a two-level tree), five (an unbalanced one).
+    #[test]
+    fn test_blake3_tree_mode() {
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        for n in [0usize, 1, 64, 65, 256, 1024, 1025, 1072, 2048, 4096, 4097] {
+            let msg: Vec<u8> = (0..n).map(|_| rng.r#gen()).collect();
+            let mut bld = CircuitAdapter::default();
+            let input: Vec<U8> = (0..n).map(|_| bld.fresh::<8>()).collect();
+            let out = hash_bytes(&mut bld, &input);
+            let wires = bld.eval_gates(&str_to_bits_le(&msg).concat());
+            assert_eq!(read_bytes(&wires, &out), blake3::hash(&msg).as_bytes().to_vec(), "{n} bytes");
+            println!("blake3 of {n} bytes: {} AND", bld.gate_counts().direct_and);
         }
-
-        assert_eq!(hws, ref_out_slice2.to_vec());
     }
 }

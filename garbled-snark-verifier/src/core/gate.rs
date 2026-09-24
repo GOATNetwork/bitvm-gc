@@ -194,30 +194,9 @@ impl Gate {
     //   gate id gid
     #[allow(clippy::type_complexity)]
     pub fn e(&self) -> Box<dyn Fn(bool, bool, S, S, Option<S>, u32, Option<S>) -> (bool, S) + '_> {
-        match self.gate_type {
-            GateType::And | GateType::Nand | GateType::Nimp | GateType::Imp => {
-                Box::new(|x, y, a, b, c, gid, salt| -> (bool, S) {
-                    assert!(c.is_some());
-                    let o = if !x { a.hash_ext(gid, salt) } else { a.hash_ext(gid, salt) ^ c.unwrap() ^ b };
-                    (self.f()(x, y), o)
-                })
-            }
-
-            GateType::Ncimp | GateType::Cimp | GateType::Nor | GateType::Or => {
-                Box::new(|x, y, a, b, c, gid, salt| -> (bool, S) {
-                    assert!(c.is_some());
-                    let o = if x { a.hash_ext(gid, salt) } else { a.hash_ext(gid, salt) ^ c.unwrap() ^ b };
-                    (self.f()(x, y), o)
-                })
-            }
-            GateType::Xor => {
-                Box::new(|x, y, a, b, _c, _gid, _salt| -> (bool, S) { (self.f()(x, y), a ^ b) })
-            }
-            GateType::Xnor => {
-                Box::new(|x, y, a, b, _c, _gid, _salt| -> (bool, S) { (self.f()(x, y), a ^ b) })
-            }
-            GateType::Not => Box::new(|x, y, a, _b, _c, _gid, _salt| -> (bool, S) { (self.f()(x, y), a) }),
-        }
+        Box::new(|x, y, a, b, c, gid, salt| -> (bool, S) {
+            (self.f()(x, y), gate_evaluate(self.gate_type, x, a, b, c, gid, salt))
+        })
     }
 
     pub fn evaluate(&mut self) {
@@ -293,11 +272,12 @@ pub fn gate_garbled_with_delta(label_a: S, label_b: S, gid: u32, gate_type: Gate
             (h1, Some(h1 ^ h0 ^ label_b))
         }
         GateType::Cimp => {
+            // b => a: a = 1 gives true; a = 0 gives !b, true for b = 0, so
+            // the ciphertext carries b0 (as for Nand), not b1.
             let a1 = label_a ^ delta;
             let h1 = a1.hash_ext(gid, salt);
             let h0 = label_a.hash_ext(gid, salt);
-            let b1 = label_b ^ delta;
-            (h1 ^ delta, Some(h1 ^ h0 ^ b1))
+            (h1 ^ delta, Some(h1 ^ h0 ^ label_b))
         }
         GateType::Nor => {
             let a1 = label_a ^ delta;
@@ -317,6 +297,28 @@ pub fn gate_garbled_with_delta(label_a: S, label_b: S, gid: u32, gate_type: Gate
         GateType::Xor => (label_a ^ label_b, None),
         GateType::Not => (label_a ^ delta, None),
     }
+}
+
+/// The evaluator's side of `gate_garbled_with_delta`: the output label from the
+/// input labels `label_a`, `label_b` the evaluator holds and the gate's
+/// ciphertext, given the plaintext value `x` of input `a`.
+///
+/// This is privacy-free garbling: the evaluator knows the values and uses `x`
+/// to pick the branch. For And, Nand, Nimp and Imp the ciphertext is used when
+/// `x` is true, for Ncimp, Cimp, Nor and Or when it is false; the output is
+/// `H(a)` or `H(a) ⊕ ct ⊕ b`. Xor and Xnor are `a ⊕ b` and Not is `a`: the
+/// garbler's `Δ` offsets of Xnor and Not are absorbed by its label choice.
+#[inline(always)]
+pub fn gate_evaluate(gate_type: GateType, x: bool, label_a: S, label_b: S, ciphertext: Option<S>, gid: u32, salt: Option<S>) -> S {
+    let uses_ciphertext = match gate_type {
+        GateType::And | GateType::Nand | GateType::Nimp | GateType::Imp => x,
+        GateType::Ncimp | GateType::Cimp | GateType::Nor | GateType::Or => !x,
+        GateType::Xor | GateType::Xnor => return label_a ^ label_b,
+        GateType::Not => return label_a,
+    };
+    let ct = ciphertext.expect("a non-free gate carries a ciphertext");
+    let h = label_a.hash_ext(gid, salt);
+    if uses_ciphertext { h ^ ct ^ label_b } else { h }
 }
 
 #[derive(Default)]
@@ -462,5 +464,28 @@ impl GateCount {
 
     pub fn ell_by_constant_montgomery() -> Self {
         Self([4098864, 105664, 0, 0, 1374, 52832, 0, 58734, 13580727, 58734, 77179])
+    }
+}
+
+#[cfg(test)]
+mod evaluate_tests {
+    use super::*;
+
+    /// Every gate type, every pair of input values, under a random `Δ`: the
+    /// evaluator's label is the garbler's label of the output's value.
+    #[test]
+    fn gate_evaluate_matches_the_garbling() {
+        for t in 0..=10u8 {
+            let gate_type = GateType::try_from(t).unwrap();
+            let f = Gate::new_with_gid(new_wirex(), new_wirex(), new_wirex(), gate_type, 0).f();
+            for (x, y) in [(false, false), (false, true), (true, false), (true, true)] {
+                let (delta, a0, b0) = (S::random(), S::random(), S::random());
+                let held = |l0: S, v: bool| if v { l0 ^ delta } else { l0 };
+                let gid = 7 + u32::from(t);
+                let (c0, ct) = gate_garbled_with_delta(a0, b0, gid, gate_type, delta, None);
+                let c = gate_evaluate(gate_type, x, held(a0, x), held(b0, y), ct, gid, None);
+                assert_eq!(c, held(c0, f(x, y)), "{gate_type} on ({x}, {y})");
+            }
+        }
     }
 }

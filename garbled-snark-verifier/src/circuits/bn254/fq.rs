@@ -409,15 +409,18 @@ mod tests {
 
     #[test]
     fn test_fq_is_qnr_montgomery() {
-        use num_traits::One;
+        // The output is one wire, not a field element. a^2 is a residue and,
+        // since p = 3 mod 4 makes -1 a non-residue, -a^2 is not: both answers.
         let a = Fq::random();
-        println!("{}", a.legendre().is_qnr());
-        let circuit = Fq::is_qnr_montgomery(Fq::wires_set_montgomery(a));
-        circuit.gate_counts().print();
-        for mut gate in circuit.1 {
-            gate.evaluate();
+        for (x, expected) in [(a * a, false), (-(a * a), true)] {
+            assert_eq!(x.legendre().is_qnr(), expected);
+            let circuit = Fq::is_qnr_montgomery(Fq::wires_set_montgomery(x));
+            circuit.gate_counts().print();
+            for mut gate in circuit.1 {
+                gate.evaluate();
+            }
+            assert_eq!(circuit.0.len(), 1);
+            assert_eq!(circuit.0[0].borrow().get_value(), expected);
         }
-        let is_qnr = Fq::from_montgomery_wires(circuit.0);
-        assert_eq!(is_qnr.is_one(), a.legendre().is_qnr());
     }
 }
