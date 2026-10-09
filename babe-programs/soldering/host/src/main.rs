@@ -26,7 +26,7 @@ fn main() {
     let (_pk, vk) = ark_groth16::Groth16::<Bn254>::setup(
         DummyMulCircuit::<Fr> { a: Some(a), b: Some(b) }, &mut rng,
     ).unwrap();
-    let static_public_inputs = a * b;
+    let static_public_inputs = [a * b, b];
 
     //  1. Create N_CC instances
     let start = Instant::now();

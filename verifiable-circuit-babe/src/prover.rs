@@ -15,7 +15,7 @@ use crate::dre::N_PADDED;
 use crate::gc::{SparseAdaptorTable, SGC_PART1_CONSTANT_SIZE};
 use crate::instance::{b_value_bits, set_gc_const_labels, set_sgc2_rq_eval_labels};
 use crate::soldering::{SolderedLabelsData, SolderingData};
-use crate::utils::{derive_hashlock, h_160, h_256, ro_from_pairing_bytes};
+use crate::utils::{derive_hashlock, dynamic_base, h_160, h_256, ro_from_pairing_bytes};
 
 pub const GROTH_16_SEED: u64 = 42;
 
@@ -297,7 +297,8 @@ impl BABEProver {
         );
 
         // Part2: compute rQ
-        let q = self.vk.gamma_abc_g1[2] * self.dyn_pubin + b;
+        let dyn_base = dynamic_base(&self.vk).expect("vk does not match the public-input layout");
+        let q = dyn_base * self.dyn_pubin + b;
         let q_affine = q.into_affine();
         fgc.reset_circuit_except_01_constants();
         set_gc_const_labels(fgc, &const_labels[1][0..2]);
@@ -463,7 +464,7 @@ mod tests {
             DummyMulCircuit::<Fr> { a: Some(a), b: Some(b) },
             &mut rng,
         ).unwrap();
-        let static_public_inputs = a * b;
+        let static_public_inputs = [a * b, b];
         let dynamic_public_inputs = a * a; // x_d
 
         // 2. Verifier enc_setup.
@@ -519,7 +520,7 @@ mod tests {
         let (_, vk) = ark_groth16::Groth16::<Bn254>::setup(
             DummyMulCircuit::<Fr> { a: Some(a), b: Some(b) }, &mut rng,
         ).unwrap();
-        let static_public_inputs = a * b;
+        let static_public_inputs = [a * b, b];
         let _dynamic_public_inputs = a * a;
 
         let verifier = BABEVerifier::new(TEST_N_CC, &vk, static_public_inputs).unwrap();
@@ -569,7 +570,7 @@ mod tests {
             &mut rng,
         )
         .unwrap();
-        let _static_public_inputs = a * b;
+        let _static_public_inputs = [a * b, b];
         let dynamic_public_inputs = a * a;
 
 

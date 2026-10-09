@@ -4,7 +4,7 @@ version = "1.1.0"
 edition = "2021"
 
 [dependencies]
-zkm-zkvm = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.7", features = ["embedded"] }
+zkm-zkvm = { workspace = true, features = ["embedded"] }
 verifiable-circuit-babe = { path = "../../../verifiable-circuit-babe" }
 
 [features]

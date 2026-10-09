@@ -10,6 +10,7 @@ use crate::gc::SGC_PART1_CONSTANT_SIZE;
 use crate::instance::CACInstance;
 use crate::instance::commit::CACInstanceCommit;
 use crate::instance::secret::Seed;
+use crate::utils::StaticInputs;
 
 /// Instances processed in parallel per batch (RAM gate).
 /// Override via CAC_BATCH_SIZE env var at runtime.
@@ -77,7 +78,7 @@ pub struct BABEVerifier {
     seeds: Vec<Seed>,
     commits: CACSetupPackage,
     vk: Groth16VerifyingKey<ark_bn254::Bn254>,
-    static_public_inputs: Fr,
+    static_public_inputs: StaticInputs,
 }
 
 impl BABEVerifier {
@@ -85,9 +86,9 @@ impl BABEVerifier {
     pub fn new(
         n_cc: usize,
         vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
-        static_public_inputs: Fr,
+        static_public_inputs: StaticInputs,
     ) -> Result<Self, String> {
-        use p3_maybe_rayon::prelude::*;
+        use rayon::prelude::*;
 
         let seeds: Vec<Seed> = (0..n_cc).map(|_| rand::random()).collect();
 
@@ -139,7 +140,7 @@ impl BABEVerifier {
         seeds: &[Seed],
         commits: &CACSetupPackage,
         vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
-        static_public_inputs: Fr,
+        static_public_inputs: StaticInputs,
     ) -> Option<Self> {
         if seeds.len() != commits.commits.len() {
             return None;
@@ -174,7 +175,7 @@ impl BABEVerifier {
             .collect();
 
         // Regenerate all M_CC finalized instances in parallel
-        use p3_maybe_rayon::prelude::*;
+        use rayon::prelude::*;
         let finalized: Vec<Result<crate::cac::FinalizedInstanceData, String>> = finalized_indices
             .par_iter()
             .map(|&i| {
@@ -317,15 +318,15 @@ mod tests {
 
         let seeds3 = [test_seed(1), test_seed(2), test_seed(3)];
         let seeds2 = [test_seed(1), test_seed(2)];
-        assert!(BABEVerifier::from_state(&seeds3, &commits, &vk, Fr::from(0u64)).is_none());
-        assert!(BABEVerifier::from_state(&seeds2, &commits, &vk, Fr::from(0u64)).is_some());
+        assert!(BABEVerifier::from_state(&seeds3, &commits, &vk, [Fr::from(0u64); 2]).is_none());
+        assert!(BABEVerifier::from_state(&seeds2, &commits, &vk, [Fr::from(0u64); 2]).is_some());
     }
 
     #[test]
     fn test_open_rejects_out_of_range_index() {
         let vk = dummy_vk();
         let commits = CACSetupPackage { commits: vec![dummy_commit()] };
-        let verifier = BABEVerifier::from_state(&[test_seed(1)], &commits, &vk, Fr::from(0u64)).unwrap();
+        let verifier = BABEVerifier::from_state(&[test_seed(1)], &commits, &vk, [Fr::from(0u64); 2]).unwrap();
 
         let err = verifier.open(&[5]).expect_err("index 5 is out of range for 1 seed");
         assert!(err.contains('5'), "error should reference the bad index: {err}");

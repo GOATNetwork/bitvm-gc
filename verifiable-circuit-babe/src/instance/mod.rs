@@ -11,7 +11,7 @@ use garbled_snark_verifier::dv_bn254::fq::Fq as DvFq;
 use garbled_snark_verifier::dv_bn254::fr::Fr as DvFr;
 use crate::dre::{N, Q_SIZE, U_BAR_SIZE};
 use crate::instance::commit::CACInstanceCommit;
-use crate::utils::{derive_hashlock, g2_project_to_ser, h_256, ro_from_pairing_bytes};
+use crate::utils::{check_vk_layout, derive_hashlock, g2_project_to_ser, h_256, ro_from_pairing_bytes, static_vk_x, StaticInputs};
 
 pub mod secret;
 pub mod commit;
@@ -39,11 +39,9 @@ impl CACInstance {
     pub fn new_from_seed(
         seed: Seed,
         vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
-        static_inputs: Fr,
+        static_inputs: StaticInputs,
     ) -> Result<Self, String> {
-        if vk.gamma_abc_g1.len() != 3 {
-            return Err("static/dynamic split does not match vk".to_string());
-        }
+        check_vk_layout(vk)?;
 
         let secrets = InstanceSecrets::new_from_seed(seed);
         let (fgc_flat, fgc_indices, sgc_flat, sgc_indices) = read_compact_gc();
@@ -107,11 +105,9 @@ impl CACInstance {
     pub fn commit_from_seed(
         seed: Seed,
         vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
-        static_inputs: Fr,
+        static_inputs: StaticInputs,
     ) -> Result<CACInstanceCommit, String> {
-        if vk.gamma_abc_g1.len() != 3 {
-            return Err("static/dynamic split does not match vk".to_string());
-        }
+        check_vk_layout(vk)?;
 
         let secrets = InstanceSecrets::new_from_seed(seed);
         let (fgc_flat, fgc_indices, sgc_flat, sgc_indices) = read_compact_gc();
@@ -204,15 +200,15 @@ impl CACInstance {
     }
 
     /// Enc*(crs, x_S, |D|, msg; r, B):
-    ///   P_S = gamma_abc[0] + Σ_{k} x_S[k]·gamma_abc[k+1]
+    ///   P_S = L_0 + Σ_{k} x_S[k]·L_{STATIC_SLOTS[k]+1}, with L_i = gamma_abc_g1[i]
     ///   mask = Y_S^r - e(r·B, γ) where Y_S^r = e(α, r·β) + e(P_S, r·γ)
     fn enc_setup(
         secrets: &InstanceSecrets,
         vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
-        static_inputs: Fr,
+        static_inputs: StaticInputs,
     ) -> Result<WitnessEncSetupCt, String> {
         let r = secrets.r;
-        let p_s = vk.gamma_abc_g1[0].into_group() + vk.gamma_abc_g1[1].into_group() * static_inputs;
+        let p_s = static_vk_x(vk, &static_inputs)?;
 
         let r_b = secrets.b * r;
         let r_delta = vk.delta_g2.into_group() * r;
@@ -376,8 +372,8 @@ mod tests {
             &mut rng,
         ).expect("groth16 prove");
 
-        // |S|=1 (a*b static), |D|=1 (a*a dynamic)
-        let static_inputs = a * b;
+        // |S|=2 (a*b, b static), |D|=1 (a*a dynamic)
+        let static_inputs = [a * b, b];
         let dynamic_inputs = a * a;
 
         let instance = CACInstance::new_from_seed([2u8; 32], &vk, static_inputs)
@@ -438,7 +434,7 @@ mod tests {
             Some(instance.secrets.aes_salt)
         );
         // check that sgc computed correctly
-        let q_proj = vk.gamma_abc_g1[2].into_group() * dynamic_inputs + b_blind;
+        let q_proj = crate::utils::dynamic_base(&vk).unwrap() * dynamic_inputs + b_blind;
         let q_affine = q_proj.into_affine();
         let q_value_bits = G1Affine::to_bits(q_affine);
         for (k, &idx) in sgc_indices.iter().enumerate() {

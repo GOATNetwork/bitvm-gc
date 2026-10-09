@@ -6,7 +6,7 @@ use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VerifyingKey};
 use ark_serialize::CanonicalDeserialize;
 use serde::{Deserialize, Serialize};
 use crate::babe::{BabeBtcSig, BtcPk, BTC_SIG_BYTES, MSG_BYTES};
-use crate::utils::{g1_from_ser_checked, g2_from_ser_checked};
+use crate::utils::{full_public_inputs, g1_from_ser_checked, g2_from_ser_checked, StaticInputs};
 use crate::wots::Wots96;
 use bitvm::signatures::Wots;
 
@@ -72,12 +72,13 @@ impl TxAssertWitness {
 
     /// Reconstruct the full Groth16 proof (π₁, π₂, π₃) and verify it.
     /// π₁ and x_d are recovered from `wots_sig`; π₂ and π₃ from `pi2`/`pi3`.
-    /// `static_public_inputs` are prepended to `[x_d]` to form the complete public input vector.
+    /// `static_public_inputs` and `x_d` are placed at their slots (`STATIC_SLOTS` / `DYNAMIC_SLOTS`)
+    /// to form the complete public input vector.
     /// Returns false if any field is malformed or the proof does not verify.
     pub fn verify_groth16_proof(
         &self,
         vk: &Groth16VerifyingKey<Bn254>,
-        static_public_inputs: &[Fr],
+        static_public_inputs: &StaticInputs,
     ) -> bool {
         let (pi1, x_d) = match self.try_recover_pi1_xd() {
             Some(v) => v,
@@ -87,8 +88,7 @@ impl TxAssertWitness {
             Some(v) => v,
             None => return false,
         };
-        let mut public_inputs = static_public_inputs.to_vec();
-        public_inputs.push(x_d);
+        let public_inputs = full_public_inputs(static_public_inputs, &[x_d]);
         verify_groth16_proof_components(pi1, pi2, pi3, &public_inputs, vk)
     }
 }
@@ -364,7 +364,7 @@ mod tests {
         let circuit = DummyMulCircuit { a: Some(a), b: Some(b) };
         let proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng).unwrap();
 
-        let static_pi = a * b;
+        let static_pi = [a * b, b];
         let x_d = a * a;
 
         let msg = pi1_xd_to_wots96_msg(&proof.a, x_d);
@@ -380,7 +380,9 @@ mod tests {
             pi3: pi3_bytes,
         };
 
-        assert!(witness.verify_groth16_proof(&vk, &[static_pi]));
+        assert!(witness.verify_groth16_proof(&vk, &static_pi));
+        // Static values in the wrong slot order must not verify.
+        assert!(!witness.verify_groth16_proof(&vk, &[static_pi[1], static_pi[0]]));
     }
 
     #[test]
@@ -405,6 +407,6 @@ mod tests {
             pi2: vec![0u8; 64],
             pi3: vec![0u8; 32],
         };
-        assert!(!witness.verify_groth16_proof(&vk, &[a * b]));
+        assert!(!witness.verify_groth16_proof(&vk, &[a * b, b]));
     }
 }

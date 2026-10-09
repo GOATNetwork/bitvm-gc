@@ -4,7 +4,7 @@ use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VerifyingKey};
 
 use ark_serialize::CanonicalSerialize;
 use ark_relations::lc;
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable};
 use serde::{Deserialize, Serialize};
 use ark_ec::pairing::Pairing;
 use garbled_snark_verifier::bag::S;
@@ -13,7 +13,7 @@ use crate::cac::{
 };
 
 use crate::wots::{wots96_verify, Wots96, Wots96PublicKey, Wots96Secret};
-use crate::utils::pi1_xd_to_wots96_msg;
+use crate::utils::{pi1_xd_to_wots96_msg, StaticInputs};
 use bitvm::signatures::Wots;
 use crate::dre::N_PADDED;
 use crate::prover::BABEProver;
@@ -135,7 +135,7 @@ pub struct BabeCACE2ERun {
 // Bitcoin transaction integration is complete, to prevent replay of a previous protocol run.
 pub fn babe_verifier_cac_setup(
     vk: &Groth16VerifyingKey<Bn254>,
-    static_public_inputs: Fr,
+    static_public_inputs: StaticInputs,
 ) -> (BABEVerifier, CACSetupPackage) {
     let verifier = BABEVerifier::new(N_CC, vk, static_public_inputs).expect("verifier CAC setup failed");
     tracing::info!("Verifier: committing all instances..");
@@ -326,6 +326,8 @@ pub fn witness_enc_decrypt(
 
 // ─── Shared test circuit ──────────────────────────────────────────────────────
 
+/// Public inputs follow the Ziren wrap layout (see `crate::utils::STATIC_SLOTS`):
+/// [a·b (static), a·a (dynamic), b (static)].
 #[derive(Copy, Clone)]
 pub struct DummyMulCircuit<F: PrimeField> {
     pub a: Option<F>,
@@ -338,8 +340,10 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DummyMulCircuit<F> {
         let b = cs.new_witness_variable(|| self.b.ok_or(SynthesisError::AssignmentMissing))?;
         let c = cs.new_input_variable(|| Ok(self.a.unwrap() * self.b.unwrap()))?;
         let d = cs.new_input_variable(|| Ok(self.a.unwrap() * self.a.unwrap()))?;
+        let e = cs.new_input_variable(|| self.b.ok_or(SynthesisError::AssignmentMissing))?;
         cs.enforce_constraint(lc!() + a, lc!() + b, lc!() + c)?;
         cs.enforce_constraint(lc!() + a, lc!() + a, lc!() + d)?;
+        cs.enforce_constraint(lc!() + b, lc!() + Variable::One, lc!() + e)?;
         Ok(())
     }
 }
