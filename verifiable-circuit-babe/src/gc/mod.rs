@@ -18,7 +18,7 @@ pub use utils::*;
 /// Increment this whenever the circuit compilation or artifact serialization format changes.
 /// Both readers (`flat_from_bytes`, `deserialize_circuit`) assert this value matches what
 /// is stored on disk; a mismatch means stale artifacts — re-run `generate_artifacts`.
-pub const ARTIFACT_VERSION: u32 = 1;
+pub const ARTIFACT_VERSION: u32 = 2;
 
 /// Hard upper bound on `num_wires` read from an artifact file.
 /// Prevents a crafted or corrupted file from triggering a multi-GB allocation.
