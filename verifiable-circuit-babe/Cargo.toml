@@ -18,7 +18,6 @@ serde = { version = "1.0.197", features = ["derive"] }
 sha2 = { workspace = true }
 rand = "0.8.5"
 rand_chacha = { version = "0.3", default-features = false }
-p3-maybe-rayon = { workspace = true, features = ["parallel"] }
 garbled-snark-verifier = { workspace = true }
 aes = "0.8"
 cfg-if = "1.0.4"

@@ -17,7 +17,7 @@ use verifiable_circuit_babe::transactions::{
     TxWronglyChallengedWitness,
 };
 use verifiable_circuit_babe::instance::secret::Seed;
-use verifiable_circuit_babe::utils::derive_hashlock;
+use verifiable_circuit_babe::utils::{derive_hashlock, StaticInputs};
 use verifiable_circuit_babe::verifier::BABEVerifier;
 use zkm_sdk::{include_elf, ProverClient, ZKMProvingKey, ZKMStdin, ZKMVerifyingKey};
 use verifiable_circuit_babe::wots::Wots96;
@@ -82,7 +82,7 @@ impl BabeBundleBuilder {
         package: &CACSetupPackage,
         bundle: &BabeBundle,
         vk: &Groth16VerifyingKey<Bn254>,
-        static_public_inputs: Fr,
+        static_public_inputs: StaticInputs,
         finalized_indices: &[usize],
     ) -> Result<(), String> {
         verify_finalized_indices_in_bundle(
@@ -118,7 +118,7 @@ impl BabeBundleBuilder {
             &mut rng,
         )
         .map_err(|e| format!("failed to prove Groth16 fixture: {e:?}"))?;
-        let static_public_inputs = a * b;
+        let static_public_inputs = [a * b, b];
         let dynamic_public_inputs = a * a;
 
         // ── Setup phase ───────────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ impl BabeBundleBuilder {
         match assert_witness.try_recover_pi1_xd() {
             None => return Err("tx_Assert: witness is not in correct format (π₁ or x_d malformed)".to_string()),
             Some(_) => {
-                if assert_witness.verify_groth16_proof(&vk, &[static_public_inputs]) {
+                if assert_witness.verify_groth16_proof(&vk, &static_public_inputs) {
                     println!("Verifier: Groth16 proof is valid — no challenge needed in production.");
                 } else {
                     return Err("tx_Assert: Groth16 proof failed to verify".to_string());

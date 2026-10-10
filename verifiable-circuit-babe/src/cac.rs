@@ -1,4 +1,4 @@
-use ark_bn254::{Fr, G1Affine};
+use ark_bn254::G1Affine;
 use ark_groth16::VerifyingKey as Groth16VerifyingKey;
 use ark_serialize::CanonicalSerialize;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use rand::Rng;
 use garbled_snark_verifier::dv_bn254::fq::Fq;
 use crate::instance::CACInstance;
 use crate::instance::secret::Seed;
-use crate::utils::{deserialize_g1affine, g1affine_is_valid, h_256, serialize_g1affine};
+use crate::utils::{deserialize_g1affine, g1affine_is_valid, h_256, serialize_g1affine, StaticInputs};
 use crate::verifier::BATCH_SIZE;
 
 /// What the Verifier sends to the Prover during the C&C commit phase.
@@ -104,9 +104,9 @@ pub fn verify_opened_instances(
     package: &CACSetupPackage,
     opened: &[(usize, Seed)],
     vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
-    static_public_inputs: Fr,
+    static_public_inputs: StaticInputs,
 ) -> Result<(), String> {
-    use p3_maybe_rayon::prelude::*;
+    use rayon::prelude::*;
     
     let n_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
     let batch_size = std::env::var("CAC_BATCH_SIZE")
@@ -271,7 +271,7 @@ mod tests {
         let (_, vk) = ark_groth16::Groth16::<ark_bn254::Bn254>::setup(
             DummyMulCircuit::<Fr> { a: Some(a), b: Some(b) }, &mut rng,
         ).expect("groth16 setup");
-        let static_public_inputs = a * b;
+        let static_public_inputs = [a * b, b];
         let _dynamic_public_inputs = a * a;
 
         // Verifier creates TEST_N_CC instances and commits.

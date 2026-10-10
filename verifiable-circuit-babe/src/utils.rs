@@ -1,10 +1,68 @@
 use ark_bn254::{Fq, Fr, G1Affine, G2Affine};
 use ark_ec::{AffineRepr, CurveGroup};
+use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_groth16::VerifyingKey as Groth16VerifyingKey;
 use ripemd::{Ripemd160, Digest as RipemdDigest};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
+
+// ── Groth16 public-input layout ───────────────────────────────────────────────
+// Layout: [vkey_hash, committed_values_digest, vk_root].
+// L_i = gamma_abc_g1[i]; public-input slot i (0-based) is multiplied by L_{i+1}, and L_0 is the constant term.
+
+pub const STATIC_SLOTS: [usize; 2] = [0, 2];
+pub const DYNAMIC_SLOTS: [usize; 1] = [1];
+pub const NUM_PUBLIC_INPUTS: usize = STATIC_SLOTS.len() + DYNAMIC_SLOTS.len();
+
+pub type StaticInputs = [Fr; STATIC_SLOTS.len()];
+pub type DynamicInputs = [Fr; DYNAMIC_SLOTS.len()];
+
+/// Static inputs of the Ziren wrap circuit.
+pub fn ziren_static_inputs(vkey_hash: &[u8; 32], vk_root: &[u8; 32]) -> StaticInputs {
+    [Fr::from_be_bytes_mod_order(vkey_hash), Fr::from_be_bytes_mod_order(vk_root)]
+}
+
+/// Checks that `vk` has exactly `NUM_PUBLIC_INPUTS` public inputs.
+pub fn check_vk_layout(vk: &Groth16VerifyingKey<ark_bn254::Bn254>) -> Result<(), String> {
+    if vk.gamma_abc_g1.len() != NUM_PUBLIC_INPUTS + 1 {
+        return Err(format!(
+            "vk has {} public inputs, expected {NUM_PUBLIC_INPUTS} (static slots {STATIC_SLOTS:?}, dynamic slots {DYNAMIC_SLOTS:?})",
+            vk.gamma_abc_g1.len().saturating_sub(1),
+        ));
+    }
+    Ok(())
+}
+
+/// P_S = L_0 + Σ_k static[k]·L_{STATIC_SLOTS[k]+1}
+pub fn static_vk_x(
+    vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
+    static_inputs: &StaticInputs,
+) -> Result<ark_bn254::G1Projective, String> {
+    check_vk_layout(vk)?;
+    Ok(STATIC_SLOTS.iter().zip(static_inputs).fold(
+        vk.gamma_abc_g1[0].into_group(),
+        |acc, (&slot, x)| acc + vk.gamma_abc_g1[slot + 1] * x,
+    ))
+}
+
+/// L_i: the base point of the dynamic input, baked into SGC part 1 as the l2 point.
+pub fn dynamic_base(vk: &Groth16VerifyingKey<ark_bn254::Bn254>) -> Result<G1Affine, String> {
+    check_vk_layout(vk)?;
+    Ok(vk.gamma_abc_g1[DYNAMIC_SLOTS[0] + 1])
+}
+
+/// Full ordered public-input vector, with each value placed at its slot.
+pub fn full_public_inputs(static_inputs: &StaticInputs, dynamic_inputs: &DynamicInputs) -> Vec<Fr> {
+    let mut out = vec![Fr::from(0u64); NUM_PUBLIC_INPUTS];
+    for (&slot, &x) in STATIC_SLOTS.iter().zip(static_inputs) {
+        out[slot] = x;
+    }
+    for (&slot, &x) in DYNAMIC_SLOTS.iter().zip(dynamic_inputs) {
+        out[slot] = x;
+    }
+    out
+}
 
 pub fn groth16_vk_x(
     vk: &Groth16VerifyingKey<ark_bn254::Bn254>,
@@ -171,6 +229,44 @@ mod tests {
         // length mismatch: public_inputs.len() + 1 != gamma_abc_g1.len()
         assert!(groth16_vk_x(&vk, &[x1]).is_none());
         assert!(groth16_vk_x(&vk, &[x1, x2, Fr::from(7u64)]).is_none());
+    }
+
+    #[test]
+    fn test_public_input_layout() {
+        let mut rng = ChaCha12Rng::seed_from_u64(6);
+        let vk = Groth16VerifyingKey::<ark_bn254::Bn254> {
+            gamma_abc_g1: (0..=NUM_PUBLIC_INPUTS)
+                .map(|_| ark_bn254::G1Projective::rand(&mut rng).into_affine())
+                .collect(),
+            ..Default::default()
+        };
+        let statics: StaticInputs = [Fr::from(3u64), Fr::from(5u64)];
+        let x_d = Fr::from(7u64);
+
+        // Placement follows STATIC_SLOTS / DYNAMIC_SLOTS.
+        let full = full_public_inputs(&statics, &[x_d]);
+        assert_eq!(full, vec![Fr::from(3u64), x_d, Fr::from(5u64)]);
+
+        // static part + dynamic part == full vk_x.
+        let p_s = static_vk_x(&vk, &statics).unwrap();
+        let q = dynamic_base(&vk).unwrap() * x_d;
+        assert_eq!((p_s + q).into_affine(), groth16_vk_x(&vk, &full).unwrap().into_affine());
+
+        // vk with the wrong number of public inputs is rejected.
+        let mut short_vk = vk.clone();
+        short_vk.gamma_abc_g1.pop();
+        assert!(check_vk_layout(&short_vk).is_err());
+        assert!(static_vk_x(&short_vk, &statics).is_err());
+        assert!(dynamic_base(&short_vk).is_err());
+    }
+
+    #[test]
+    fn test_ziren_static_inputs_big_endian() {
+        let mut vkey_hash = [0u8; 32];
+        vkey_hash[31] = 2;
+        let mut vk_root = [0u8; 32];
+        vk_root[30] = 1;
+        assert_eq!(ziren_static_inputs(&vkey_hash, &vk_root), [Fr::from(2u64), Fr::from(256u64)]);
     }
 
     #[test]
