@@ -25,7 +25,7 @@ ripemd = "0.2.0"
 rayon = "1.11.0"
 
 [target.'cfg(not(target_os = "zkvm"))'.dependencies]
-bitvm = { git = "https://github.com/GOATNetwork/BitVM.git", branch = "GA" }
+bitvm = { git = "https://github.com/GOATNetwork/BitVM.git", rev = "26b0bd61b61b24b50b2d2443a7fda8e58412edfa" }
 bitcoin = { version = "0.32.5", features = ["rand-std"] }
 zkm-sdk = { workspace = true }
 zkm-verifier = { workspace = true }

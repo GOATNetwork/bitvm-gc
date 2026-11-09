@@ -15,7 +15,7 @@ ark-crypto-primitives = "0.5.0"
 rand = "0.8.5"
 tracing = "0.1"
 rand_chacha = { version = "0.3", default-features = false }
-bitvm = { git = "https://github.com/GOATNetwork/BitVM.git", branch = "GA" }
+bitvm = { git = "https://github.com/GOATNetwork/BitVM.git", rev = "26b0bd61b61b24b50b2d2443a7fda8e58412edfa" }
 
 [build-dependencies]
 zkm-build = { workspace = true }
